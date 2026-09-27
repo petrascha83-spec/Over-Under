@@ -35,24 +35,26 @@ def simulate_basketball_game(expected_home_pts, expected_away_pts, simulations=1
 
 def fetch_real_topsport_events():
     matches = []
+    target_url = "https://www.topsport.lt/api/events?sportId=2&limit=50"
     
-    # TOPSPORT mobilus API endpoint'as
-    url = "https://www.topsport.lt/api/events?sportId=2&limit=50"
-    
+    # Naudojame viešą proxy, kad TOPSPORT nematytų GitHub serverio IP adreso
+    proxy_url = f"https://api.allorigins.win/raw?url={target_url}"
+
     headers = {
-        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
-        "Accept": "application/json, text/plain, */*",
-        "Origin": "https://www.topsport.lt",
-        "Referer": "https://www.topsport.lt/lazybos/krepsinis"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "application/json"
     }
 
     try:
-        response = requests.get(url, headers=headers, timeout=10)
+        response = requests.get(proxy_url, headers=headers, timeout=15)
         if response.status_code == 200:
             data = response.json()
-            events = data.get("data", []) or data.get("events", [])
+            events = data.get("data", []) or data.get("events", []) or []
             
             for ev in events:
+                if not isinstance(ev, dict):
+                    continue
+                    
                 home_team = ev.get("homeTeam", {}).get("name") or ev.get("home_team_name")
                 away_team = ev.get("awayTeam", {}).get("name") or ev.get("away_team_name")
                 league = ev.get("competition", {}).get("name") or "KREPŠINIS"
@@ -60,17 +62,15 @@ def fetch_real_topsport_events():
                 if not home_team or not away_team:
                     continue
 
-                # Ieškome TOTAL market (Over/Under)
-                markets = ev.get("markets", [])
+                markets = ev.get("markets", []) or []
                 for m in markets:
                     m_type = str(m.get("type", "")).lower()
                     m_name = str(m.get("name", "")).lower()
 
                     if "total" in m_type or "suminis" in m_name or "daugiau/mažiau" in m_name:
-                        outcomes = m.get("outcomes", [])
+                        outcomes = m.get("outcomes", []) or []
                         line = None
-                        over_odds = 1.85
-                        under_odds = 1.85
+                        over_odds, under_odds = 1.85, 1.85
 
                         for o in outcomes:
                             o_name = str(o.get("name", "")).lower()
@@ -82,7 +82,7 @@ def fetch_real_topsport_events():
 
                         if line and line > 100:
                             matches.append({
-                                "league": f"🏀 {league.upper()}",
+                                "league": f"🏀 {str(league).upper()}",
                                 "match": f"{home_team} vs {away_team}",
                                 "line": line,
                                 "over_odds": over_odds,
@@ -90,7 +90,7 @@ def fetch_real_topsport_events():
                             })
                             break
     except Exception as e:
-        print("API klaida:", e)
+        print("Proxy klaida:", e)
 
     return matches
 
@@ -99,7 +99,7 @@ def run_agent():
     matches = fetch_real_topsport_events()
 
     if not matches:
-        send_telegram_msg(f"ℹ️ *{today_date}:* Tiesioginis TOPSPORT API atsakė, bet šiuo metu nebuvo aktyvių krepšinio totalų (arba GitHub IP užblokuotas API lygmeniu).")
+        send_telegram_msg(f"ℹ️ *{today_date}:* Proxy nepavyko praeiti apsaugos arba šiuo metu nėra aktyvių krepšinio totalų.")
         return
 
     full_report = f"🏀 *TIKRA TOPSPORT KREPŠINIO PASIŪLA ({today_date})*\n"
