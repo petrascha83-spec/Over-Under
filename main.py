@@ -2,8 +2,6 @@ import math
 import random
 import os
 import requests
-import json
-import re
 from datetime import datetime
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -35,69 +33,77 @@ def simulate_basketball_game(expected_home_pts, expected_away_pts, simulations=1
         away_scores.append(generate_poisson(expected_away_pts))
     return home_scores, away_scores
 
-def fetch_topsport_direct():
+def fetch_real_topsport_events():
     matches = []
-    today_str = datetime.now().strftime("%Y-%m-%d")
-
-    # 1. Bandome tiesioginę TOPSPORT užklausą
+    
+    # TOPSPORT mobilus API endpoint'as
+    url = "https://www.topsport.lt/api/events?sportId=2&limit=50"
+    
     headers = {
-        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "lt-LT,lt;q=0.9",
+        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+        "Accept": "application/json, text/plain, */*",
+        "Origin": "https://www.topsport.lt",
+        "Referer": "https://www.topsport.lt/lazybos/krepsinis"
     }
 
     try:
-        res = requests.get("https://www.topsport.lt/lazybos/krepsinis", headers=headers, timeout=8)
-        if res.status_code == 200 and "event" in res.text.lower():
-            # Ištraukiame rungtynes iš TOPSPORT HTML struktūros
-            raw_matches = re.findall(r'class="[^"]*event[^"]*"[^>]*>(.*?)</div>', res.text, re.DOTALL)
-            for m in raw_matches:
-                teams = re.findall(r'>([^<]+-[^<]+)<', m)
-                if teams:
-                    parts = teams[0].split('-')
-                    if len(parts) == 2:
-                        home, away = parts[0].strip(), parts[1].strip()
-                        line = random.choice([155.5, 162.5, 168.5, 174.5])
-                        matches.append({
-                            "time": "Pre-Match / Live",
-                            "league": "🇱🇹 TOPSPORT KREPŠINIS",
-                            "match": f"{home} vs {away}",
-                            "line": line,
-                            "over_odds": 1.85,
-                            "under_odds": 1.85
-                        })
-    except Exception as e:
-        print("Tiesioginė TOPSPORT užklausa nepavyko:", e)
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            events = data.get("data", []) or data.get("events", [])
+            
+            for ev in events:
+                home_team = ev.get("homeTeam", {}).get("name") or ev.get("home_team_name")
+                away_team = ev.get("awayTeam", {}).get("name") or ev.get("away_team_name")
+                league = ev.get("competition", {}).get("name") or "KREPŠINIS"
+                
+                if not home_team or not away_team:
+                    continue
 
-    # 2. Jei TOPSPORT užblokuotas iš JAV serverio, naudojame aktyvų Lietuvos lygų/rungtynių generatorių-srautą pagal TOPSPORT tvarkaraštį
-    if not matches:
-        print("Naudojamas atsparus srautas dienos krepšinio analizei...")
-        active_games = [
-            ("Žalgiris Kaunas", "Rytas Vilnius", "🇱🇹 BETSAFE LKL", 166.5),
-            ("Lietkabelis", "Neptūnas Klaipėda", "🇱🇹 BETSAFE LKL", 158.5),
-            ("Real Madrid", "Barcelona", "🇪🇸 ACB LYGA", 164.0),
-            ("Olympiacos", "Panathinaikos", "🇪🇺 EUROLYGA", 154.5),
-            ("ASVEL", "Monaco", "🇪🇺 EUROLYGA", 161.5)
-        ]
-        
-        for home, away, league, line in active_games:
-            matches.append({
-                "time": "Pre-Match / Live",
-                "league": league,
-                "match": f"{home} vs {away}",
-                "line": line,
-                "over_odds": round(random.uniform(1.82, 1.90), 2),
-                "under_odds": round(random.uniform(1.82, 1.90), 2)
-            })
+                # Ieškome TOTAL market (Over/Under)
+                markets = ev.get("markets", [])
+                for m in markets:
+                    m_type = str(m.get("type", "")).lower()
+                    m_name = str(m.get("name", "")).lower()
+
+                    if "total" in m_type or "suminis" in m_name or "daugiau/mažiau" in m_name:
+                        outcomes = m.get("outcomes", [])
+                        line = None
+                        over_odds = 1.85
+                        under_odds = 1.85
+
+                        for o in outcomes:
+                            o_name = str(o.get("name", "")).lower()
+                            if "daugiau" in o_name or "over" in o_name:
+                                line = float(o.get("handicap") or o.get("point") or 0)
+                                over_odds = float(o.get("rate") or o.get("price") or 1.85)
+                            elif "mažiau" in o_name or "under" in o_name:
+                                under_odds = float(o.get("rate") or o.get("price") or 1.85)
+
+                        if line and line > 100:
+                            matches.append({
+                                "league": f"🏀 {league.upper()}",
+                                "match": f"{home_team} vs {away_team}",
+                                "line": line,
+                                "over_odds": over_odds,
+                                "under_odds": under_odds
+                            })
+                            break
+    except Exception as e:
+        print("API klaida:", e)
 
     return matches
 
 def run_agent():
     today_date = datetime.now().strftime("%Y-%m-%d")
-    matches = fetch_topsport_direct()
+    matches = fetch_real_topsport_events()
 
-    full_report = f"🏀 *TOPSPORT KREPŠINIO PASIŪLA IR PROGNOZĖS ({today_date})*\n"
-    full_report += f"Išanalizuota mačų: *{len(matches)}*\n"
+    if not matches:
+        send_telegram_msg(f"ℹ️ *{today_date}:* Tiesioginis TOPSPORT API atsakė, bet šiuo metu nebuvo aktyvių krepšinio totalų (arba GitHub IP užblokuotas API lygmeniu).")
+        return
+
+    full_report = f"🏀 *TIKRA TOPSPORT KREPŠINIO PASIŪLA ({today_date})*\n"
+    full_report += f"Surasta mačų: *{len(matches)}*\n"
     full_report += "───────────────────────────\n\n"
 
     for m in matches:
@@ -114,16 +120,16 @@ def run_agent():
         val_over = (prob_over * m["over_odds"]) - 1
         val_under = (prob_under * m["under_odds"]) - 1
 
-        full_report += f"⏰ *Būsena:* {m['time']} | 🏆 *Lyga:* {m['league']}\n"
+        full_report += f"🏆 *Lyga:* {m['league']}\n"
         full_report += f"⚔️ *Rungtynės:* {m['match']}\n"
-        full_report += f"📊 Prognozuojamas totalas: *{home_exp + away_exp:.1f}* | Riba: *{m['line']}*\n"
+        full_report += f"📊 Prognozuojama: *{home_exp + away_exp:.1f}* | TOPSPORT Riba: *{m['line']}*\n"
 
         if val_over > 0.01:
             full_report += f"✅ *PROGNOZĖ:* OVER {m['line']} (Koef: `{m['over_odds']}`, Vertė: +{val_over*100:.1f}%)\n"
         elif val_under > 0.01:
             full_report += f"✅ *PROGNOZĖ:* UNDER {m['line']} (Koef: `{m['under_odds']}`, Vertė: +{val_under*100:.1f}%)\n"
         else:
-            full_report += f"⚖️ *Riba nustatyta tiksliai (vertės nėra).*\n"
+            full_report += f"⚖️ *Riba nustatyta tiksliai.*\n"
 
         full_report += "\n" + "─"*20 + "\n\n"
 
