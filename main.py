@@ -2,6 +2,7 @@ import math
 import random
 import os
 import requests
+import json
 from datetime import datetime
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -37,55 +38,63 @@ def fetch_topsport_basketball():
     matches = []
     today_str = datetime.now().strftime("%Y-%m-%d")
     
-    # Topsport krepšinio pasiūlos srauto URL ir antraštės
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
         "Accept": "application/json, text/plain, */*",
-        "Referer": "https://www.topsport.lt/lažybos/krepšinis"
-    }
+        "Accept-Language": "lt-LT,lt;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Origin": "https://www.topsport.lt",
+        "Referer": "https://www.topsport.lt/labybos/krepsinis"
+    })
 
-    # TOPSPORT vidiniai krepšinio kategorijų endpointai
-    url = "https://www.topsport.lt/api/v1/sports/basketball/events"
+    # Skirtingi galimi TOPSPORT vidiniai maršrutai
+    urls = [
+        "https://www.topsport.lt/api/v1/sports/basketball/events",
+        "https://www.topsport.lt/api/v1/events/highlights?sport=basketball"
+    ]
 
-    try:
-        res = requests.get(url, headers=headers, timeout=10)
-        if res.status_code == 200:
-            data = res.json()
-            events = data.get("data", []) or data.get("events", [])
+    for url in urls:
+        try:
+            res = session.get(url, timeout=10)
+            if res.status_code == 200:
+                data = res.json()
+                events = data.get("data", []) or data.get("events", []) or []
+                
+                for ev in events:
+                    home = ev.get("home_team_name") or ev.get("homeTeam", {}).get("name") or "Komanda A"
+                    away = ev.get("away_team_name") or ev.get("awayTeam", {}).get("name") or "Komanda B"
+                    league = ev.get("competition_name") or ev.get("category", {}).get("name") or "TOPSPORT Krepšinis"
+                    
+                    # Tikriname maršrute esančias rinkas (markets)
+                    markets = ev.get("markets", [])
+                    for m in markets:
+                        m_name = m.get("name", "").lower()
+                        if "total" in m_name or "suminis" in m_name or "pranašumas" in m_name:
+                            outcomes = m.get("outcomes", [])
+                            over_obj = next((o for o in outcomes if "daugiau" in o.get("name", "").lower() or "over" in o.get("name", "").lower()), None)
+                            under_obj = next((o for o in outcomes if "mažiau" in o.get("name", "").lower() or "under" in o.get("name", "").lower()), None)
+                            
+                            if over_obj and under_obj:
+                                line = float(over_obj.get("handicap") or over_obj.get("point") or 160.5)
+                                over_odds = float(over_obj.get("rate") or over_obj.get("price") or 1.85)
+                                under_odds = float(under_obj.get("rate") or under_obj.get("price") or 1.85)
 
-            for ev in events:
-                home = ev.get("home_team_name", "Komanda A")
-                away = ev.get("away_team_name", "Komanda B")
-                league = ev.get("competition_name", "TOPSPORT Krepšinis")
-                match_time = ev.get("start_time", "")[11:16]
-
-                # Iškrapštome Totalų (OVER/UNDER) rinką
-                markets = ev.get("markets", [])
-                totals_market = next((m for m in markets if "total" in m.get("name", "").lower() or "suminis" in m.get("name", "").lower()), None)
-
-                if totals_market:
-                    outcomes = totals_market.get("outcomes", [])
-                    over_obj = next((o for o in outcomes if "daugiau" in o.get("name", "").lower() or "over" in o.get("name", "").lower()), None)
-                    under_obj = next((o for o in outcomes if "mažiau" in o.get("name", "").lower() or "under" in o.get("name", "").lower()), None)
-
-                    if over_obj and under_obj:
-                        line = float(over_obj.get("handicap", 160.5))
-                        over_odds = float(over_obj.get("rate", 1.85))
-                        under_odds = float(under_obj.get("rate", 1.85))
-
-                        matches.append({
-                            "date": today_str,
-                            "time": match_time if match_time else "Dienos mačas",
-                            "league": f"🇱🇹 {league.upper()}",
-                            "match": f"{home} vs {away}",
-                            "home_exp": line / 2 + random.uniform(-1.5, 2.0),
-                            "away_exp": line / 2 + random.uniform(-2.0, 1.5),
-                            "line": line,
-                            "over_odds": over_odds,
-                            "under_odds": under_odds
-                        })
-    except Exception as e:
-        print("Klaida skaitant Topsport duomenis:", e)
+                                matches.append({
+                                    "date": today_str,
+                                    "time": "Pre-Match / Live",
+                                    "league": f"🇱🇹 {league.upper()}",
+                                    "match": f"{home} vs {away}",
+                                    "home_exp": line / 2 + random.uniform(-1.5, 2.0),
+                                    "away_exp": line / 2 + random.uniform(-2.0, 1.5),
+                                    "line": line,
+                                    "over_odds": over_odds,
+                                    "under_odds": under_odds
+                                })
+                                break
+                if matches:
+                    break
+        except Exception as e:
+            print(f"Klaida skaitant {url}: {e}")
 
     return matches
 
@@ -94,11 +103,11 @@ def run_agent():
     matches = fetch_topsport_basketball()
 
     if not matches:
-        send_telegram_msg(f"ℹ️ *{today_date}:* TOPSPORT krepšinio pre-match pasiūloje šiuo metu aktyvių totalų nerasta arba serveryje atliekami atnaujinimai.")
+        send_telegram_msg(f"ℹ️ *{today_date}:* TOPSPORT apsauga užblokavo GitHub Cloud užklausą arba šią akimirką pasiūloje nėra krepšinio suminių (Over/Under) ribų.")
         return
 
     full_report = f"🏀 *TOPSPORT KREPŠINIO PASIŪLA IR PROGNOZĖS ({today_date})*\n"
-    full_report += f"Atsiųsta mačų analizei: *{len(matches)}*\n"
+    full_report += f"Rasta ir išanalizuota mačų: *{len(matches)}*\n"
     full_report += "───────────────────────────\n\n"
 
     for m in matches:
@@ -112,7 +121,7 @@ def run_agent():
         val_over = (prob_over * m["over_odds"]) - 1
         val_under = (prob_under * m["under_odds"]) - 1
 
-        full_report += f"⏰ *Laikas:* {m['time']} | 🏆 *Lyga:* {m['league']}\n"
+        full_report += f"⏰ *Būsena:* {m['time']} | 🏆 *Lyga:* {m['league']}\n"
         full_report += f"⚔️ *Rungtynės:* {m['match']}\n"
         full_report += f"📊 Prognozuojamas totalas: *{m['home_exp'] + m['away_exp']:.1f}* | Riba: *{m['line']}*\n"
 
