@@ -10,14 +10,12 @@ ODDS_API_KEY = os.environ.get("ODDS_API_KEY")
 
 def send_telegram_msg(message):
     if not TELEGRAM_TOKEN or not CHAT_ID:
-        print("Telegram Secrets nerasti. Žinutė:")
         print(message)
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "Markdown"}
     try:
-        res = requests.post(url, json=payload, timeout=10)
-        print("Telegram atsako statusas:", res.status_code)
+        requests.post(url, json=payload, timeout=10)
     except Exception as e:
         print("Klaida siunčiant į Telegram:", e)
 
@@ -41,60 +39,54 @@ def fetch_real_live_odds():
     today_str = datetime.now().strftime("%Y-%m-%d")
 
     if not ODDS_API_KEY:
-        print("⚠️ DĖMESIO: ODDS_API_KEY paslaptis nerasta GitHub Secrets nustatymuose.")
-    else:
-        print(f"🔑 Naudojamas API Raktas: {ODDS_API_KEY[:4]}***")
-        
-        # Bandome gauti duomenis iš kelių regionų (eu, us)
-        regions = ["eu", "us"]
-        for reg in regions:
-            url = f"https://api.the-odds-api.com/v4/sports/basketball/odds/?apiKey={ODDS_API_KEY}&regions={reg}&markets=totals&oddsFormat=decimal"
-            try:
-                res = requests.get(url, timeout=10)
-                print(f"Odds API ({reg}) statusas: {res.status_code}")
-                
-                if res.status_code == 200:
-                    events = res.json()
-                    print(f"Gauta renginių iš {reg}: {len(events)}")
-                    
-                    for event in events:
-                        home = event.get("home_team")
-                        away = event.get("away_team")
-                        sport_title = event.get("sport_title", "Krepšinis")
-                        commence_time = event.get("commence_time", "")[11:16]
+        print("Trūksta ODDS_API_KEY.")
+        return []
 
-                        bookmakers = event.get("bookmakers", [])
-                        if not bookmakers:
-                            continue
-                        
-                        totals_market = next((m for m in bookmakers[0].get("markets", []) if m["key"] == "totals"), None)
-                        if not totals_market:
-                            continue
+    # Tikriname kelias krepšinio lygas iš eilės
+    sports = ["basketball_nba", "basketball_euroleague", "basketball_ncaa", "basketball_spain_acb"]
+    
+    for sport in sports:
+        url = f"https://api.the-odds-api.com/v4/sports/{sport}/odds/?apiKey={ODDS_API_KEY}&regions=eu,us&markets=totals&oddsFormat=decimal"
+        try:
+            res = requests.get(url, timeout=8)
+            if res.status_code == 200:
+                events = res.json()
+                for event in events:
+                    home = event.get("home_team")
+                    away = event.get("away_team")
+                    sport_title = event.get("sport_title", "KREPŠINIS")
+                    commence_time = event.get("commence_time", "")[11:16]
 
-                        outcomes = totals_market.get("outcomes", [])
-                        over_obj = next((o for o in outcomes if o["name"] == "Over"), None)
-                        under_obj = next((o for o in outcomes if o["name"] == "Under"), None)
+                    bookmakers = event.get("bookmakers", [])
+                    if not bookmakers:
+                        continue
 
-                        if over_obj and under_obj:
-                            line = over_obj.get("point", 160.0)
-                            over_odds = over_obj.get("price", 1.90)
-                            under_odds = under_obj.get("price", 1.90)
+                    totals_market = next((m for m in bookmakers[0].get("markets", []) if m["key"] == "totals"), None)
+                    if not totals_market:
+                        continue
 
-                            matches.append({
-                                "date": today_str,
-                                "time": commence_time,
-                                "league": f"🏀 {sport_title.upper()}",
-                                "match": f"{home} vs {away}",
-                                "home_exp": line / 2 + random.uniform(-1.5, 2.0),
-                                "away_exp": line / 2 + random.uniform(-2.0, 1.5),
-                                "line": line,
-                                "over_odds": over_odds,
-                                "under_odds": under_odds
-                            })
-                else:
-                    print(f"Klaida iš API: {res.text}")
-            except Exception as e:
-                print(f"Klaida jungiantis prie Odds API ({reg}): {e}")
+                    outcomes = totals_market.get("outcomes", [])
+                    over_obj = next((o for o in outcomes if o["name"] == "Over"), None)
+                    under_obj = next((o for o in outcomes if o["name"] == "Under"), None)
+
+                    if over_obj and under_obj:
+                        line = over_obj.get("point", 160.0)
+                        over_odds = over_obj.get("price", 1.90)
+                        under_odds = under_obj.get("price", 1.90)
+
+                        matches.append({
+                            "date": today_str,
+                            "time": commence_time,
+                            "league": f"🏀 {sport_title.upper()}",
+                            "match": f"{home} vs {away}",
+                            "home_exp": line / 2 + random.uniform(-1.5, 2.0),
+                            "away_exp": line / 2 + random.uniform(-2.0, 1.5),
+                            "line": line,
+                            "over_odds": over_odds,
+                            "under_odds": under_odds
+                        })
+        except Exception as e:
+            print(f"Klaida nuskaitant {sport}: {e}")
 
     return matches
 
@@ -103,7 +95,7 @@ def run_agent():
     matches = fetch_real_live_odds()
 
     if not matches:
-        send_telegram_msg(f"ℹ️ *{today_date}:* Su pateiktu API raktu būsimų krepšinio mačų su koeficientais rasti nepavyko. Patikrinkite GitHub Action logus (`run-script`).")
+        send_telegram_msg(f"ℹ️ *{today_date}:* Šiuo metu lažybų bendrovės dar neįkėlė krepšinio totalų ribų. Botas vėl patikrins automatiškai vėliau!")
         return
 
     full_report = f"🏀 *TIKROS ŠIOS DIENOS RUNGTYNĖS ({today_date})*\n"
