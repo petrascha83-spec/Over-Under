@@ -40,56 +40,62 @@ async def fetch_topsport_with_browser():
     today_str = datetime.now().strftime("%Y-%m-%d")
 
     async with async_playwright() as p:
-        # Paleidžiama tikra naršyklė
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            viewport={"width": 1280, "height": 800}
         )
         page = await context.new_page()
 
         try:
-            # Užkrauname tiesioginę TOPSPORT krepšinio pasiūlą
-            await page.goto("https://www.topsport.lt/lazybos/krepsinis", wait_until="networkidle", timeout=30000)
+            # Atidarome tiesioginį TOPSPORT krepšinio puslapį
+            await page.goto("https://www.topsport.lt/lazybos/krepsinis", wait_until="domcontentloaded", timeout=30000)
+            await page.wait_for_timeout(4000)
+
+            # Paslenkame puslapį žemyn, kad atsidarytų dinaminiai koeficientai
+            await page.evaluate("window.scrollBy(0, 1000)")
             await page.wait_for_timeout(3000)
 
-            # Ištraukiame mačų blokus
-            event_elements = await page.query_selector_all(".event-row, .event-item, [class*='eventCard']")
+            # Nuskaitome visus matomus teksto blokus puslapyje
+            content = await page.content()
             
-            for elem in event_elements:
-                text = await elem.inner_text()
-                lines = [line.strip() for line in text.split("\n") if line.strip()]
-
-                # Filtruojame ir atrenkame komandas bei ribas
-                if len(lines) >= 3:
-                    home = lines[0]
-                    away = lines[1] if len(lines) > 1 else "Gost"
-
-                    # Paieška ar yra skaičių, atitinkančių totalo ribą (pvz. 165.5)
-                    found_line = None
-                    found_odds = []
-                    for item in lines:
-                        if "." in item and item.replace(".", "").isdigit():
-                            val = float(item)
-                            if 120.0 <= val <= 220.0 and not found_line:
-                                found_line = val
-                            elif 1.1 <= val <= 5.0:
-                                found_odds.append(val)
-
-                    if found_line:
-                        over_odds = found_odds[0] if len(found_odds) > 0 else 1.85
-                        under_odds = found_odds[1] if len(found_odds) > 1 else 1.85
-
-                        matches.append({
-                            "date": today_str,
-                            "time": "Pre-Match / Live",
-                            "league": "🇱🇹 TOPSPORT KREPŠINIS",
-                            "match": f"{home} vs {away}",
-                            "home_exp": found_line / 2 + random.uniform(-1.5, 2.0),
-                            "away_exp": found_line / 2 + random.uniform(-2.0, 1.5),
-                            "line": found_line,
-                            "over_odds": over_odds,
-                            "under_odds": under_odds
-                        })
+            # Paieška visų matomų elementų su tekstu
+            elements = await page.query_selector_all("div, section, article")
+            
+            for elem in elements:
+                try:
+                    text = await elem.inner_text()
+                    lines = [line.strip() for line in text.split("\n") if line.strip()]
+                    
+                    # Iškrapštome komandų pavadinimus ir totalo ribą
+                    if len(lines) >= 4 and ("vs" in text.lower() or " - " in text or "daugiau" in text.lower()):
+                        # Bandom rasti skaičių su tašku (pvz. 162.5)
+                        for line in lines:
+                            if "." in line:
+                                try:
+                                    val = float(line.replace(",", "."))
+                                    if 120.0 <= val <= 230.0:
+                                        home_name = lines[0]
+                                        away_name = lines[1] if len(lines) > 1 else "Gost"
+                                        
+                                        # Tikriname ar mačas dar neįtrauktas
+                                        match_name = f"{home_name} vs {away_name}"
+                                        if not any(m["match"] == match_name for m in matches):
+                                            matches.append({
+                                                "date": today_str,
+                                                "time": "Pre-Match / Live",
+                                                "league": "🇱🇹 TOPSPORT KREPŠINIS",
+                                                "match": match_name,
+                                                "home_exp": val / 2 + random.uniform(-1.5, 2.0),
+                                                "away_exp": val / 2 + random.uniform(-2.0, 1.5),
+                                                "line": val,
+                                                "over_odds": 1.85,
+                                                "under_odds": 1.85
+                                            })
+                                except ValueError:
+                                    pass
+                except Exception:
+                    continue
 
         except Exception as e:
             print("Playwright klaida:", e)
