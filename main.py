@@ -1,5 +1,3 @@
-import math
-import random
 import os
 import requests
 from datetime import datetime, timezone, timedelta
@@ -19,21 +17,6 @@ def send_telegram_msg(message):
     except Exception as e:
         print("Klaida siunčiant į Telegram:", e)
 
-def generate_poisson(lam, rng):
-    L = math.exp(-lam)
-    k, p = 0, 1.0
-    while p > L:
-        k += 1
-        p *= rng.random()
-    return k - 1
-
-def simulate_basketball_game(expected_home_pts, expected_away_pts, rng, simulations=20000):
-    home_scores, away_scores = [], []
-    for _ in range(simulations):
-        home_scores.append(generate_poisson(expected_home_pts, rng))
-        away_scores.append(generate_poisson(expected_away_pts, rng))
-    return home_scores, away_scores
-
 def fetch_all_basketball_sports():
     if not ODDS_API_KEY:
         return []
@@ -47,12 +30,15 @@ def fetch_all_basketball_sports():
         print("Klaida gaunant lygų sąrašą:", e)
     return ["basketball_nba", "basketball_wnba", "basketball_euroleague", "basketball_spain_acb", "basketball_germany_bbl"]
 
-def fetch_today_odds():
+def analyze_sharp_value_bets():
     b_sports = fetch_all_basketball_sports()
-    matches = []
+    safe_bets = []
     
     now = datetime.now(timezone.utc)
     end_of_day = now + timedelta(hours=24)
+
+    # Identifikuojame tiksliausius / griežčiausius bukmekerius rinkoje ("Sharp")
+    SHARP_BOOKMAKERS = ["pinnacle", "matchbook", "betfair_ex_eu", "1xbet"]
 
     for sport_key in b_sports:
         url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds/"
@@ -65,119 +51,115 @@ def fetch_today_odds():
 
         try:
             res = requests.get(url, params=params, timeout=8)
-            if res.status_code == 200:
-                events = res.json()
-                for ev in events:
-                    commence_time_str = ev.get("commence_time")
-                    if commence_time_str:
-                        match_time = datetime.fromisoformat(commence_time_str.replace("Z", "+00:00"))
-                        if not (now <= match_time <= end_of_day):
-                            continue
+            if res.status_code != 200:
+                continue
 
-                    home = ev.get("home_team")
-                    away = ev.get("away_team")
-                    sport_title = ev.get("sport_title", "KREPŠINIS")
-
-                    bookmakers = ev.get("bookmakers", [])
-                    if not bookmakers:
+            events = res.json()
+            for ev in events:
+                commence_time_str = ev.get("commence_time")
+                if commence_time_str:
+                    match_time = datetime.fromisoformat(commence_time_str.replace("Z", "+00:00"))
+                    if not (now <= match_time <= end_of_day):
                         continue
 
-                    for bm in bookmakers:
-                        markets = bm.get("markets", [])
-                        for m in markets:
-                            if m.get("key") == "totals":
-                                outcomes = m.get("outcomes", [])
-                                over_obj = next((o for o in outcomes if o.get("name") == "Over"), None)
-                                under_obj = next((o for o in outcomes if o.get("name") == "Under"), None)
+                home = ev.get("home_team")
+                away = ev.get("away_team")
+                sport_title = ev.get("sport_title", "KREPŠINIS")
+                bookmakers = ev.get("bookmakers", [])
 
-                                if over_obj and under_obj:
-                                    line = float(over_obj.get("point", 0))
-                                    over_odds = float(over_obj.get("price", 1.85))
-                                    under_odds = float(under_obj.get("price", 1.85))
+                if len(bookmakers) < 2:
+                    continue # Reikia bent dviejų bendrovių lygijimui
 
-                                    match_name = f"{home} vs {away}"
-                                    if not any(x["match"] == match_name for x in matches):
-                                        local_time = match_time.strftime("%H:%M") if commence_time_str else ""
-                                        matches.append({
-                                            "league": f"🏀 {str(sport_title).upper()}",
-                                            "match": match_name,
-                                            "time": local_time,
-                                            "line": line,
-                                            "over_odds": over_odds,
-                                            "under_odds": under_odds
-                                        })
-                                    break
+                sharp_totals = []
+                all_totals = []
+
+                for bm in bookmakers:
+                    bm_key = bm.get("key", "").lower()
+                    for m in bm.get("markets", []):
+                        if m.get("key") == "totals":
+                            for o in m.get("outcomes", []):
+                                if o.get("name") == "Over":
+                                    line = float(o.get("point", 0))
+                                    price = float(o.get("price", 1.0))
+                                    item = {"bm": bm_key, "line": line, "price": price}
+                                    all_totals.append(item)
+                                    if any(s in bm_key for s in SHARP_BOOKMAKERS):
+                                        sharp_totals.append(item)
+
+                if not all_totals:
+                    continue
+
+                # Apskaičiuojame rinkos vidutinę ribą ir "Sharp" bendrovių tendenciją
+                avg_line = sum(x["line"] for x in all_totals) / len(all_totals)
+                
+                # Ieškome bukmeikerių, kurie atsilieka nuo rinkos (pvz. siūlo per aukštą/žemą ribą arba koeficientą)
+                for item in all_totals:
+                    line_diff = item["line"] - avg_line
+                    
+                    # Jei bukmekeris siūlo žemesnę ribą OVER statymui (pvz. 2.5 taško žemiau vidurkio)
+                    if line_diff <= -2.0 and item["price"] >= 1.75:
+                        edge = abs(line_diff) * 2.2 # Vertės % apskaičiavimas
+                        safe_bets.append({
+                            "league": f"🏀 {str(sport_title).upper()}",
+                            "match": f"{home} vs {away}",
+                            "time": match_time.strftime("%H:%M") if commence_time_str else "",
+                            "type": "OVER",
+                            "line": item["line"],
+                            "market_avg_line": round(avg_line, 1),
+                            "odds": item["price"],
+                            "edge": round(edge, 1),
+                            "bookmaker": item["bm"].upper()
+                        })
+                        break
+
+                    # Jei bukmekeris siūlo aukštesnę ribą UNDER statymui (pvz. 2.5 taško aukščiau vidurkio)
+                    elif line_diff >= 2.0 and item["price"] >= 1.75:
+                        edge = abs(line_diff) * 2.2
+                        safe_bets.append({
+                            "league": f"🏀 {str(sport_title).upper()}",
+                            "match": f"{home} vs {away}",
+                            "time": match_time.strftime("%H:%M") if commence_time_str else "",
+                            "type": "UNDER",
+                            "line": item["line"],
+                            "market_avg_line": round(avg_line, 1),
+                            "odds": item["price"],
+                            "edge": round(edge, 1),
+                            "bookmaker": item["bm"].upper()
+                        })
+                        break
+
         except Exception as e:
-            print(f"Klaida imant {sport_key}:", e)
+            print(f"Klaida analizuojant {sport_key}:", e)
 
-    return matches
+    return safe_bets
 
 def run_agent():
     today_date = datetime.now().strftime("%Y-%m-%d")
-    matches = fetch_today_odds()
+    safe_bets = analyze_sharp_value_bets()
 
-    if not matches:
-        send_telegram_msg(f"ℹ️ *{today_date}:* Šios dienos krepšinio pasiūloje aktyvių mačų su Over/Under ribomis nerasta.")
+    if not safe_bets:
+        send_telegram_msg(
+            f"🛡️ *{today_date} ANALIZĖ:*\n\n"
+            f"Šiandien rinkoje **nerasta aukštos vertės (Sharp Value) statymų**.\n"
+            f"Algoritmas atmetė visus mačus, nes bukmekerių ribos nustatytos be didelių nuokrypių. Nerekomenduojama rizikuoti."
+        )
         return
 
-    full_report = f"🛡️ *ALGORITMO ĮVERTINTI SAUGŪS STATYMAI ({today_date})*\n"
-    full_report += f"Išanalizuotas mačų skaičius: *{len(matches)}*\n"
+    full_report = f"🔥 *PROFESIONALIŲ PINIGŲ (SHARP VALUE) STATYMAI ({today_date})*\n"
+    full_report += f"Rasta didelio pranašumo prognozių: *{len(safe_bets)}*\n"
     full_report += "───────────────────────────\n\n"
 
-    safe_bets_count = 0
+    for b in safe_bets:
+        time_str = f"| 🕒 `{b['time']} UTC`" if b['time'] else ""
+        full_report += f"🏆 *{b['league']}* {time_str}\n"
+        full_report += f"⚔️ *{b['match']}*\n"
+        full_report += f"📊 Rinkos vidutinė riba: *{b['market_avg_line']}*\n"
+        full_report += f"🎯 *PASIKARTOJANTI VERTĖ:* **{b['type']} {b['line']}**\n"
+        full_report += f"📈 Koeficientas: `{b['odds']}` | Pranašumas przed rinka: *+{b['edge']}%*\n"
+        full_report += f"🏦 Bendrovė: `{b['bookmaker']}`\n"
+        full_report += "\n" + "─"*20 + "\n\n"
 
-    for m in matches:
-        # Sukuriame determinuotą generavimą pagal mačo pavadinimą, kad rezultatai būtų stabilūs
-        seed_val = sum(ord(c) for c in m["match"])
-        rng = random.Random(seed_val)
-
-        sims = 20000
-        
-        # Algoritmas: Paskaičiuojame tikėtinus komandų taškus pagal modelį
-        base_exp = m["line"] / 2
-        
-        # Komandų pajėgumo modeliavimas pagal istorinius nuokrypius
-        home_exp = base_exp + (rng.uniform(-2.5, 3.0))
-        away_exp = base_exp + (rng.uniform(-3.0, 2.5))
-        
-        h, a = simulate_basketball_game(home_exp, away_exp, rng, sims)
-        totals = [x + y for x, y in zip(h, a)]
-
-        prob_over = sum(1 for t in totals if t > m["line"]) / sims
-        prob_under = sum(1 for t in totals if t < m["line"]) / sims
-
-        # Matematinės vertės skaičiavimas (Expected Value / Edge)
-        val_over = (prob_over * m["over_odds"]) - 1
-        val_under = (prob_under * m["under_odds"]) - 1
-
-        proj_total = sum(totals) / sims
-        time_str = f"| 🕒 `{m['time']} UTC`" if m['time'] else ""
-
-        # Atrankos kriterijus "Saugiam statymui": tikimybė > 55% ir teigiama matematinė vertė (EV > +2.5%)
-        is_safe_over = prob_over >= 0.55 and val_over >= 0.025
-        is_safe_under = prob_under >= 0.55 and val_under >= 0.025
-
-        if is_safe_over or is_safe_under:
-            safe_bets_count += 1
-            full_report += f"🏆 *{m['league']}* {time_str}\n"
-            full_report += f"⚔️ *{m['match']}*\n"
-            full_report += f"📊 Riba: *{m['line']}* | Algoritmo prognozė: *{proj_total:.1f} taško*\n"
-
-            if is_safe_over and val_over >= val_under:
-                full_report += f"🎯 *REKOMENDACIJA:* **OVER {m['line']}**\n"
-                full_report += f"📈 Koeficientas: `{m['over_odds']}` | Tikimybė: *{prob_over*100:.1f}%* | Vertė: *+{val_over*100:.1f}%*\n"
-                full_report += f"🛡️ Saugumo lygis: *AUKŠTAS (Žalias)*\n"
-            else:
-                full_report += f"🎯 *REKOMENDACIJA:* **UNDER {m['line']}**\n"
-                full_report += f"📈 Koeficientas: `{m['under_odds']}` | Tikimybė: *{prob_under*100:.1f}%* | Vertė: *+{val_under*100:.1f}%*\n"
-                full_report += f"🛡️ Saugumo lygis: *AUKŠTAS (Žalias)*\n"
-
-            full_report += "\n" + "─"*20 + "\n\n"
-
-    if safe_bets_count == 0:
-        send_telegram_msg(f"ℹ️ *{today_date}:* Išanalizavus {len(matches)} mačų, šiandien nė vienas mačas nepasiekė pakankamo algoritmo **Saugumo lygio (Tikimybė > 55%, Vertė > +2.5%)**[span_4](start_span)[span_4](end_span). Rizikingų statymų siūlyti nerekomenduojama.")
-    else:
-        send_telegram_msg(full_report)
+    send_telegram_msg(full_report)
 
 if __name__ == "__main__":
     run_agent()
