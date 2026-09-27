@@ -36,23 +36,35 @@ def simulate_basketball_game(expected_home_pts, expected_away_pts, simulations=1
 
 def fetch_basketball_odds():
     if not ODDS_API_KEY:
-        print("Trūksta ODDS_API_KEY GitHub Secrets nustatymuose!")
+        send_telegram_msg("⚠️ *KLAIDA:* `ODDS_API_KEY` nėra pridėtas prie GitHub Secrets!")
         return []
 
-    # Krepšinio lygos iš API (NBA, Eurolyga ir kt.)
-    sports = ["basketball_nba", "basketball_euroleague"]
+    # Gauti visas šiuo metu aktyvias krepšinio lygas
+    sports_url = f"https://api.the-odds-api.com/v4/sports?apiKey={ODDS_API_KEY}"
     matches = []
 
-    for sport in sports:
-        url = f"https://api.the-odds-api.com/v4/sports/{sport}/odds/"
-        params = {
-            "apiKey": ODDS_API_KEY,
-            "regions": "eu",
-            "markets": "totals",
-            "oddsFormat": "decimal"
-        }
+    try:
+        s_res = requests.get(sports_url, timeout=10)
+        if s_res.status_code != 200:
+            send_telegram_msg(f"⚠️ *API klaida ({s_res.status_code}):* Patikrinkite, ar teisingas API raktas.")
+            return []
 
-        try:
+        all_sports = s_res.json()
+        b_sports = [s["key"] for s in all_sports if s.get("group") == "Basketball"]
+
+        if not b_sports:
+            send_telegram_msg("ℹ️ Šiuo metu API neturi jokių aktyvių krepšinio lygų.")
+            return []
+
+        for sport_key in b_sports:
+            url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds/"
+            params = {
+                "apiKey": ODDS_API_KEY,
+                "regions": "eu,us",
+                "markets": "totals",
+                "oddsFormat": "decimal"
+            }
+
             res = requests.get(url, params=params, timeout=10)
             if res.status_code == 200:
                 events = res.json()
@@ -61,7 +73,6 @@ def fetch_basketball_odds():
                     away = ev.get("away_team")
                     sport_title = ev.get("sport_title", "KREPŠINIS")
 
-                    # Ištraukiame koeficientus iš pirmo pasiekiamo bookmaker'io
                     bookmakers = ev.get("bookmakers", [])
                     if not bookmakers:
                         continue
@@ -80,15 +91,15 @@ def fetch_basketball_odds():
                                 under_odds = float(under_obj.get("price", 1.85))
 
                                 matches.append({
-                                    "league": f"🏀 {sport_title.upper()}",
+                                    "league": f"🏀 {str(sport_title).upper()}",
                                     "match": f"{home} vs {away}",
                                     "line": line,
                                     "over_odds": over_odds,
                                     "under_odds": under_odds
                                 })
                                 break
-        except Exception as e:
-            print(f"Klaida gauti {sport} duomenis:", e)
+    except Exception as e:
+        print("Klaida:", e)
 
     return matches
 
@@ -96,8 +107,11 @@ def run_agent():
     today_date = datetime.now().strftime("%Y-%m-%d")
     matches = fetch_basketball_odds()
 
+    if not matches and ODDS_API_KEY:
+        send_telegram_msg(f"ℹ️ *{today_date}:* API užklausa pavyko, bet šiuo metu krepšinio rungtynėse nėra pateiktų Over/Under ribų.")
+        return
+
     if not matches:
-        send_telegram_msg(f"ℹ️ *{today_date}:* Šiuo metu krepšinio rungtynių su aktyviais totalais nerasta arba nesukonfigūruotas ODDS_API_KEY.")
         return
 
     full_report = f"🏀 *KREPŠINIO PASIŪLA IR PROGNOZĖS ({today_date})*\n"
