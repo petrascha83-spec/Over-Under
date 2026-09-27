@@ -3,6 +3,7 @@ import random
 import os
 import requests
 import asyncio
+import json
 from datetime import datetime
 from playwright.async_api import async_playwright
 
@@ -35,7 +36,7 @@ def simulate_basketball_game(expected_home_pts, expected_away_pts, simulations=1
         away_scores.append(generate_poisson(expected_away_pts))
     return home_scores, away_scores
 
-async def fetch_topsport_with_browser():
+async def fetch_topsport_with_network_capture():
     matches = []
     today_str = datetime.now().strftime("%Y-%m-%d")
 
@@ -43,76 +44,94 @@ async def fetch_topsport_with_browser():
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            viewport={"width": 1280, "height": 800}
+            viewport={"width": 1366, "height": 768}
         )
         page = await context.new_page()
 
-        try:
-            # Atidarome tiesioginį TOPSPORT krepšinio puslapį
-            await page.goto("https://www.topsport.lt/lazybos/krepsinis", wait_until="domcontentloaded", timeout=30000)
-            await page.wait_for_timeout(4000)
+        # Pagavimo funkcija: klausomės visų TOPSPORT vidinių tinklo atsakymų
+        async def handle_response(response):
+            if "events" in response.url or "outcomes" in response.url or "sports" in response.url:
+                try:
+                    data = await response.json()
+                    events = data.get("data", []) or data.get("events", []) or []
+                    if isinstance(data, list):
+                        events = data
 
-            # Paslenkame puslapį žemyn, kad atsidarytų dinaminiai koeficientai
-            await page.evaluate("window.scrollBy(0, 1000)")
+                    for ev in events:
+                        if not isinstance(ev, dict):
+                            continue
+                        
+                        # Ištraukiame komandas
+                        home = ev.get("home_team_name") or ev.get("homeTeam", {}).get("name") or ev.get("title", "").split(" - ")[0]
+                        away = ev.get("away_team_name") or ev.get("awayTeam", {}).get("name") or "Svečiai"
+                        league = ev.get("competition_name") or "TOPSPORT KREPŠINIS"
+
+                        if not home or home == "Svečiai":
+                            continue
+
+                        # Paieška tarp rinkų (markets)
+                        markets = ev.get("markets", []) or []
+                        for m in markets:
+                            m_name = str(m.get("name", "")).lower()
+                            if "total" in m_name or "suminis" in m_name or "daugiau/mažiau" in m_name or "points" in m_name:
+                                outcomes = m.get("outcomes", []) or []
+                                over_obj = next((o for o in outcomes if "daugiau" in str(o.get("name", "")).lower() or "over" in str(o.get("name", "")).lower()), None)
+                                under_obj = next((o for o in outcomes if "mažiau" in str(o.get("name", "")).lower() or "under" in str(o.get("name", "")).lower()), None)
+
+                                if over_obj:
+                                    line = float(over_obj.get("handicap") or over_obj.get("point") or 160.5)
+                                    over_odds = float(over_obj.get("rate") or over_obj.get("price") or 1.85)
+                                    under_odds = float(under_obj.get("rate") or under_obj.get("price") or 1.85) if under_obj else 1.85
+
+                                    match_key = f"{home} vs {away}"
+                                    if not any(x["match"] == match_key for x in matches):
+                                        matches.append({
+                                            "date": today_str,
+                                            "time": "Gyvai / Artėjančios",
+                                            "league": f"🇱🇹 {str(league).upper()}",
+                                            "match": match_key,
+                                            "home_exp": line / 2 + random.uniform(-1.5, 2.0),
+                                            "away_exp": line / 2 + random.uniform(-2.0, 1.5),
+                                            "line": line,
+                                            "over_odds": over_odds,
+                                            "under_odds": under_odds
+                                        })
+                except Exception:
+                    pass
+
+        # Pririšame tinklo klausymąsi
+        page.on("response", handle_response)
+
+        try:
+            # 1. Užkrauname krepšinio puslapį
+            await page.goto("https://www.topsport.lt/lazybos/krepsinis", wait_until="networkidle", timeout=30000)
             await page.wait_for_timeout(3000)
 
-            # Nuskaitome visus matomus teksto blokus puslapyje
-            content = await page.content()
-            
-            # Paieška visų matomų elementų su tekstu
-            elements = await page.query_selector_all("div, section, article")
-            
-            for elem in elements:
-                try:
-                    text = await elem.inner_text()
-                    lines = [line.strip() for line in text.split("\n") if line.strip()]
-                    
-                    # Iškrapštome komandų pavadinimus ir totalo ribą
-                    if len(lines) >= 4 and ("vs" in text.lower() or " - " in text or "daugiau" in text.lower()):
-                        # Bandom rasti skaičių su tašku (pvz. 162.5)
-                        for line in lines:
-                            if "." in line:
-                                try:
-                                    val = float(line.replace(",", "."))
-                                    if 120.0 <= val <= 230.0:
-                                        home_name = lines[0]
-                                        away_name = lines[1] if len(lines) > 1 else "Gost"
-                                        
-                                        # Tikriname ar mačas dar neįtrauktas
-                                        match_name = f"{home_name} vs {away_name}"
-                                        if not any(m["match"] == match_name for m in matches):
-                                            matches.append({
-                                                "date": today_str,
-                                                "time": "Pre-Match / Live",
-                                                "league": "🇱🇹 TOPSPORT KREPŠINIS",
-                                                "match": match_name,
-                                                "home_exp": val / 2 + random.uniform(-1.5, 2.0),
-                                                "away_exp": val / 2 + random.uniform(-2.0, 1.5),
-                                                "line": val,
-                                                "over_odds": 1.85,
-                                                "under_odds": 1.85
-                                            })
-                                except ValueError:
-                                    pass
-                except Exception:
-                    continue
+            # 2. Automatiškai pravažiuojame žemyn, kad suveiktų visi API užklausimai
+            for i in range(5):
+                await page.evaluate(f"window.scrollBy(0, {800 * (i + 1)})")
+                await page.wait_for_timeout(1000)
+
+            # 3. Jei turime "Live" skiltį, aplankome ir ją
+            await page.goto("https://www.topsport.lt/lazybos/gyvai/krepsinis", wait_until="domcontentloaded", timeout=15000)
+            await page.wait_for_timeout(3000)
 
         except Exception as e:
-            print("Playwright klaida:", e)
+            print("Klaida užkraunant puslapį:", e)
 
         await browser.close()
     return matches
 
 def run_agent():
     today_date = datetime.now().strftime("%Y-%m-%d")
-    matches = asyncio.run(fetch_topsport_with_browser())
+    matches = asyncio.run(fetch_topsport_with_network_capture())
 
     if not matches:
         send_telegram_msg(f"ℹ️ *{today_date}:* TOPSPORT puslapis užsikrovė, tačiau šiuo metu krepšinio totalų (Over/Under) lentelėse nerasta.")
         return
 
     full_report = f"🏀 *TOPSPORT KREPŠINIO PASIŪLA IR PROGNOZĖS ({today_date})*\n"
-    full_report += f"Išanalizuota mačų: *{len(matches)}*\n"
+    full_report += f"Atsiųsta mačų analizei: *{len(matches)}*\n"
     full_report += "───────────────────────────\n\n"
 
     for m in matches:
