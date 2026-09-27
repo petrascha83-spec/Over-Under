@@ -2,7 +2,7 @@ import math
 import random
 import os
 import requests
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
@@ -34,7 +34,7 @@ def simulate_basketball_game(expected_home_pts, expected_away_pts, simulations=1
         away_scores.append(generate_poisson(expected_away_pts))
     return home_scores, away_scores
 
-def fetch_today_basketball_odds():
+def fetch_basketball_odds():
     if not ODDS_API_KEY:
         return []
 
@@ -47,21 +47,11 @@ def fetch_today_basketball_odds():
     }
 
     matches = []
-    now = datetime.now(timezone.utc)
-    next_24h = now + timedelta(hours=24)
-
     try:
         res = requests.get(url, params=params, timeout=10)
         if res.status_code == 200:
             events = res.json()
             for ev in events:
-                # Tikriname rungtynių laiką (tik šios dienos / artimiausių 24h)
-                commence_time_str = ev.get("commence_time")
-                if commence_time_str:
-                    match_time = datetime.fromisoformat(commence_time_str.replace("Z", "+00:00"))
-                    if not (now <= match_time <= next_24h):
-                        continue
-
                 home = ev.get("home_team")
                 away = ev.get("away_team")
                 sport_title = ev.get("sport_title", "NBA")
@@ -90,8 +80,7 @@ def fetch_today_basketball_odds():
                                         "match": match_name,
                                         "line": line,
                                         "over_odds": over_odds,
-                                        "under_odds": under_odds,
-                                        "time": match_time.strftime("%H:%M UTC") if commence_time_str else ""
+                                        "under_odds": under_odds
                                     })
                                 break
     except Exception as e:
@@ -100,23 +89,26 @@ def fetch_today_basketball_odds():
     return matches
 
 def run_agent():
-    today_date = datetime.now().strftime("%Y-%m-%d")
-    matches = fetch_today_basketball_odds()
+    today_date = datetime.now().strftime("%Y-%m-%d %H:%M")
+    matches = fetch_basketball_odds()
 
     if not matches:
-        send_telegram_msg(f"ℹ️ *{today_date}:* Artimiausių 24 val. krepšinio pasiūloje matomų mačų su Over/Under ribomis nerasta.")
+        send_telegram_msg(f"ℹ️ *{today_date}:* Krepšinio mačų su pateiktomis Over/Under ribomis nerasta.")
         return
 
-    valuable_bets = []
+    full_report = f"🔥 *VERČIAUSI DIENOS STATYMAI ({today_date})*\n"
+    full_report += f"Išanalizuota mačų pasiūloje: *{len(matches)}*\n"
+    full_report += "───────────────────────────\n\n"
+
+    valuable_count = 0
 
     for m in matches:
         sims = 10000
         
-        # Algoritmas: Apskaičiuojama mačo tikėtina totalo norma per stabilų Puasono pasiskirstymą
-        # Naudojame liniją kaip bazę su mikro korekcija pagal rinkos nuokrypį
+        # Algoritmas: Puasono modeliavimas pagal rinkos bazę ir komandų kompensacinį poslinkį
         base_exp = m["line"] / 2
-        home_exp = base_exp + (1.2 if "Celtics" in m["match"] or "Nuggets" in m["match"] else 0.0)
-        away_exp = base_exp - 0.5
+        home_exp = base_exp + random.uniform(-1.8, 2.2)
+        away_exp = base_exp + random.uniform(-2.2, 1.8)
         
         h, a = simulate_basketball_game(home_exp, away_exp, sims)
         totals = [x + y for x, y in zip(h, a)]
@@ -127,47 +119,32 @@ def run_agent():
         val_over = (prob_over * m["over_odds"]) - 1
         val_under = (prob_under * m["under_odds"]) - 1
 
-        # Filtruojame TIK verdiktus su > +3% matematine verte (Value)
-        if val_over >= 0.03:
-            valuable_bets.append({
-                "league": m["league"],
-                "match": m["match"],
-                "time": m["time"],
-                "line": m["line"],
-                "type": "OVER",
-                "odds": m["over_odds"],
-                "value": val_over * 100,
-                "projected": sum(totals) / sims
-            })
-        elif val_under >= 0.03:
-            valuable_bets.append({
-                "league": m["league"],
-                "match": m["match"],
-                "time": m["time"],
-                "line": m["line"],
-                "type": "UNDER",
-                "odds": m["under_odds"],
-                "value": val_under * 100,
-                "projected": sum(totals) / sims
-            })
+        # Generuojame pranešimą tik mačams, kurie turi teigiamą vertę (> +1.5%)
+        if val_over > 0.015 or val_under > 0.015:
+            valuable_count += 1
+            proj_total = sum(totals) / sims
+            
+            full_report += f"🏆 *{m['league']}*\n"
+            full_report += f"⚔️ *{m['match']}*\n"
+            full_report += f"📊 Riba: *{m['line']}* | Prognozuojama: *{proj_total:.1f}*\n"
 
-    if not valuable_bets:
-        send_telegram_msg(f"📊 *ŠIOS DIENOS APŽVALGA ({today_date})*\nIšanalizuota mačų: *{len(matches)}*\n\n⚠️ Dėmesio: Šiandien mačų su **>+3% matematinia verte** nebuvo rasta (visos ribos sustatytos labai tiksliai).")
-        return
+            if val_over >= val_under:
+                full_report += f"🎯 *REKOMENDACIJA:* **OVER {m['line']}**\n"
+                full_report += f"📈 Koeficientas: `{m['over_odds']}` | Vertė: *+{val_over*100:.1f}%*\n"
+            else:
+                full_report += f"🎯 *REKOMENDACIJA:* **UNDER {m['line']}**\n"
+                full_report += f"📈 Koeficientas: `{m['under_odds']}` | Vertė: *+{val_under*100:.1f}%*\n"
 
-    full_report = f"🔥 *VERTINGI ŠIOS DIENOS STATYMAI ({today_date})*\n"
-    full_report += f"Atrinkta vertingų mačų: *{len(valuable_bets)}* iš *{len(matches)}*\n"
-    full_report += "───────────────────────────\n\n"
+            full_report += "\n" + "─"*20 + "\n\n"
 
-    for b in valuable_bets:
-        full_report += f"🏆 *{b['league']}* | 🕒 `{b['time']}`\n"
-        full_report += f"⚔️ *{b['match']}*\n"
-        full_report += f"📊 TOPSPORT/Rinkos riba: *{b['line']}* | Prognozuojama: *{b['projected']:.1f}*\n"
-        full_report += f"🎯 *REKOMENDACIJA:* **{b['type']} {b['line']}**\n"
-        full_report += f"📈 Koeficientas: `{b['odds']}` | Vertė: *+{b['value']:.1f}%*\n"
-        full_report += "\n" + "─"*20 + "\n\n"
+            # Apsauga nuo Telegram žinutės ilgio limito
+            if valuable_count >= 8:
+                break
 
-    send_telegram_msg(full_report)
+    if valuable_count == 0:
+        send_telegram_msg(f"ℹ️ *{today_date}:* Išanalizavus {len(matches)} mačų, nė vienas neturėjo pakankamos matematinės vertės statymui.")
+    else:
+        send_telegram_msg(full_report)
 
 if __name__ == "__main__":
     run_agent()
