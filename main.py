@@ -10,12 +10,13 @@ ODDS_API_KEY = os.environ.get("ODDS_API_KEY")
 
 def send_telegram_msg(message):
     if not TELEGRAM_TOKEN or not CHAT_ID:
-        print(message)
+        print("Trūksta Telegram kintamųjų.")
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "Markdown"}
     try:
-        requests.post(url, json=payload, timeout=10)
+        res = requests.post(url, json=payload, timeout=10)
+        print("Telegram atsakymas:", res.status_code, res.text)
     except Exception as e:
         print("Klaida siunčiant į Telegram:", e)
 
@@ -36,24 +37,23 @@ def simulate_basketball_game(expected_home_pts, expected_away_pts, simulations=1
 
 def fetch_basketball_odds():
     if not ODDS_API_KEY:
-        send_telegram_msg("⚠️ *KLAIDA:* `ODDS_API_KEY` nėra pridėtas prie GitHub Secrets!")
+        send_telegram_msg("⚠️ *KLAIDA:* `ODDS_API_KEY` nėra perduotas į environment variables!")
         return []
 
-    # Gauti visas šiuo metu aktyvias krepšinio lygas
     sports_url = f"https://api.the-odds-api.com/v4/sports?apiKey={ODDS_API_KEY}"
     matches = []
 
     try:
         s_res = requests.get(sports_url, timeout=10)
         if s_res.status_code != 200:
-            send_telegram_msg(f"⚠️ *API klaida ({s_res.status_code}):* Patikrinkite, ar teisingas API raktas.")
+            send_telegram_msg(f"⚠️ *The Odds API klaida ({s_res.status_code}):* Patikrinkite API raktą.")
             return []
 
         all_sports = s_res.json()
         b_sports = [s["key"] for s in all_sports if s.get("group") == "Basketball"]
 
         if not b_sports:
-            send_telegram_msg("ℹ️ Šiuo metu API neturi jokių aktyvių krepšinio lygų.")
+            send_telegram_msg("ℹ️ Šiuo metu The Odds API sistemoje nėra jokių aktyvių krepšinio lygų.")
             return []
 
         for sport_key in b_sports:
@@ -77,38 +77,40 @@ def fetch_basketball_odds():
                     if not bookmakers:
                         continue
 
-                    bm = bookmakers[0]
-                    markets = bm.get("markets", [])
-                    for m in markets:
-                        if m.get("key") == "totals":
-                            outcomes = m.get("outcomes", [])
-                            over_obj = next((o for o in outcomes if o.get("name") == "Over"), None)
-                            under_obj = next((o for o in outcomes if o.get("name") == "Under"), None)
+                    for bm in bookmakers:
+                        markets = bm.get("markets", [])
+                        for m in markets:
+                            if m.get("key") == "totals":
+                                outcomes = m.get("outcomes", [])
+                                over_obj = next((o for o in outcomes if o.get("name") == "Over"), None)
+                                under_obj = next((o for o in outcomes if o.get("name") == "Under"), None)
 
-                            if over_obj and under_obj:
-                                line = float(over_obj.get("point", 0))
-                                over_odds = float(over_obj.get("price", 1.85))
-                                under_odds = float(under_obj.get("price", 1.85))
+                                if over_obj and under_obj:
+                                    line = float(over_obj.get("point", 0))
+                                    over_odds = float(over_obj.get("price", 1.85))
+                                    under_odds = float(under_obj.get("price", 1.85))
 
-                                matches.append({
-                                    "league": f"🏀 {str(sport_title).upper()}",
-                                    "match": f"{home} vs {away}",
-                                    "line": line,
-                                    "over_odds": over_odds,
-                                    "under_odds": under_odds
-                                })
-                                break
+                                    match_name = f"{home} vs {away}"
+                                    if not any(x["match"] == match_name for x in matches):
+                                        matches.append({
+                                            "league": f"🏀 {str(sport_title).upper()}",
+                                            "match": match_name,
+                                            "line": line,
+                                            "over_odds": over_odds,
+                                            "under_odds": under_odds
+                                        })
+                                    break
     except Exception as e:
-        print("Klaida:", e)
+        send_telegram_msg(f"⚠️ *Skripto vykdymo klaida:* `{e}`")
 
     return matches
 
 def run_agent():
-    today_date = datetime.now().strftime("%Y-%m-%d")
+    today_date = datetime.now().strftime("%Y-%m-%d %H:%M")
     matches = fetch_basketball_odds()
 
     if not matches and ODDS_API_KEY:
-        send_telegram_msg(f"ℹ️ *{today_date}:* API užklausa pavyko, bet šiuo metu krepšinio rungtynėse nėra pateiktų Over/Under ribų.")
+        send_telegram_msg(f"ℹ️ *{today_date}:* API patikra atlikta sėkmingai, tačiau šiuo metu jokiose krepšinio rungtynėse nėra pateiktų `Totals` (Over/Under) ribų.")
         return
 
     if not matches:
