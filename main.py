@@ -42,11 +42,23 @@ def fetch_real_live_odds():
         print("Trūksta ODDS_API_KEY.")
         return []
 
-    # Tikriname kelias krepšinio lygas iš eilės
-    sports = ["basketball_nba", "basketball_euroleague", "basketball_ncaa", "basketball_spain_acb"]
-    
-    for sport in sports:
-        url = f"https://api.the-odds-api.com/v4/sports/{sport}/odds/?apiKey={ODDS_API_KEY}&regions=eu,us&markets=totals&oddsFormat=decimal"
+    # 1. Pirmiausia gauname VISAS šiuo metu aktyvias krepšinio lygas pasaulyje
+    sports_url = f"https://api.the-odds-api.com/v4/sports/?apiKey={ODDS_API_KEY}"
+    try:
+        res = requests.get(sports_url, timeout=10)
+        if res.status_code == 200:
+            all_sports = res.json()
+            # Atrenkame tik visas krepšinio lygas
+            active_basketball_leagues = [s["key"] for s in all_sports if "basketball" in s["key"]]
+        else:
+            active_basketball_leagues = ["basketball_nba", "basketball_euroleague"]
+    except Exception as e:
+        print(f"Klaida tikrinant lygas: {e}")
+        active_basketball_leagues = ["basketball_nba", "basketball_euroleague"]
+
+    # 2. Tikriname kiekvieną aktyvią lygą
+    for league in active_basketball_leagues:
+        url = f"https://api.the-odds-api.com/v4/sports/{league}/odds/?apiKey={ODDS_API_KEY}&regions=eu,us&markets=totals&oddsFormat=decimal"
         try:
             res = requests.get(url, timeout=8)
             if res.status_code == 200:
@@ -61,32 +73,33 @@ def fetch_real_live_odds():
                     if not bookmakers:
                         continue
 
-                    totals_market = next((m for m in bookmakers[0].get("markets", []) if m["key"] == "totals"), None)
-                    if not totals_market:
-                        continue
+                    # Paieška tarp visų pateiktų lažybų bendrovių
+                    for bookmaker in bookmakers:
+                        totals_market = next((m for m in bookmaker.get("markets", []) if m["key"] == "totals"), None)
+                        if totals_market:
+                            outcomes = totals_market.get("outcomes", [])
+                            over_obj = next((o for o in outcomes if o["name"] == "Over"), None)
+                            under_obj = next((o for o in outcomes if o["name"] == "Under"), None)
 
-                    outcomes = totals_market.get("outcomes", [])
-                    over_obj = next((o for o in outcomes if o["name"] == "Over"), None)
-                    under_obj = next((o for o in outcomes if o["name"] == "Under"), None)
+                            if over_obj and under_obj:
+                                line = over_obj.get("point", 160.0)
+                                over_odds = over_obj.get("price", 1.90)
+                                under_odds = under_obj.get("price", 1.90)
 
-                    if over_obj and under_obj:
-                        line = over_obj.get("point", 160.0)
-                        over_odds = over_obj.get("price", 1.90)
-                        under_odds = under_obj.get("price", 1.90)
-
-                        matches.append({
-                            "date": today_str,
-                            "time": commence_time,
-                            "league": f"🏀 {sport_title.upper()}",
-                            "match": f"{home} vs {away}",
-                            "home_exp": line / 2 + random.uniform(-1.5, 2.0),
-                            "away_exp": line / 2 + random.uniform(-2.0, 1.5),
-                            "line": line,
-                            "over_odds": over_odds,
-                            "under_odds": under_odds
-                        })
+                                matches.append({
+                                    "date": today_str,
+                                    "time": commence_time,
+                                    "league": f"🏀 {sport_title.upper()}",
+                                    "match": f"{home} vs {away}",
+                                    "home_exp": line / 2 + random.uniform(-1.5, 2.0),
+                                    "away_exp": line / 2 + random.uniform(-2.0, 1.5),
+                                    "line": line,
+                                    "over_odds": over_odds,
+                                    "under_odds": under_odds
+                                })
+                                break # Radus ribą iš vieno bookmakerio, einame prie kitų mačų
         except Exception as e:
-            print(f"Klaida nuskaitant {sport}: {e}")
+            print(f"Klaida nuskaitant {league}: {e}")
 
     return matches
 
@@ -95,10 +108,10 @@ def run_agent():
     matches = fetch_real_live_odds()
 
     if not matches:
-        send_telegram_msg(f"ℹ️ *{today_date}:* Šiuo metu lažybų bendrovės dar neįkėlė krepšinio totalų ribų. Botas vėl patikrins automatiškai vėliau!")
+        send_telegram_msg(f"ℹ️ *{today_date}:* Tarptautiniame API šiuo metu krepšinio totalų ribos dar neįkeltos. Patikrinkite vėliau!")
         return
 
-    full_report = f"🏀 *TIKROS ŠIOS DIENOS RUNGTYNĖS ({today_date})*\n"
+    full_report = f"🏀 *TIKROS ŠIOS DIENOS RUNGTYNĖS IR PROGNOZĖS ({today_date})*\n"
     full_report += f"Išanalizuota mačų: *{len(matches)}*\n"
     full_report += "───────────────────────────\n\n"
 
