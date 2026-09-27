@@ -38,53 +38,65 @@ def fetch_basketball_odds():
     if not ODDS_API_KEY:
         return []
 
-    url = "https://api.the-odds-api.com/v4/sports/basketball_nba/odds/"
-    params = {
-        "apiKey": ODDS_API_KEY,
-        "regions": "us,eu",
-        "markets": "totals",
-        "oddsFormat": "decimal"
-    }
+    # Tikriname Europos lygas, kuriose šiandien vyksta rungtynės
+    euro_leagues = [
+        "basketball_euroleague",
+        "basketball_spain_acb",
+        "basketball_germany_bbl",
+        "basketball_france_lnb",
+        "basketball_italy_lega_a",
+        "basketball_turkey_tbl"
+    ]
 
     matches = []
-    try:
-        res = requests.get(url, params=params, timeout=10)
-        if res.status_code == 200:
-            events = res.json()
-            for ev in events:
-                home = ev.get("home_team")
-                away = ev.get("away_team")
-                sport_title = ev.get("sport_title", "NBA")
 
-                bookmakers = ev.get("bookmakers", [])
-                if not bookmakers:
-                    continue
+    for league_key in euro_leagues:
+        url = f"https://api.the-odds-api.com/v4/sports/{league_key}/odds/"
+        params = {
+            "apiKey": ODDS_API_KEY,
+            "regions": "eu",
+            "markets": "totals",
+            "oddsFormat": "decimal"
+        }
 
-                for bm in bookmakers:
-                    markets = bm.get("markets", [])
-                    for m in markets:
-                        if m.get("key") == "totals":
-                            outcomes = m.get("outcomes", [])
-                            over_obj = next((o for o in outcomes if o.get("name") == "Over"), None)
-                            under_obj = next((o for o in outcomes if o.get("name") == "Under"), None)
+        try:
+            res = requests.get(url, params=params, timeout=8)
+            if res.status_code == 200:
+                events = res.json()
+                for ev in events:
+                    home = ev.get("home_team")
+                    away = ev.get("away_team")
+                    sport_title = ev.get("sport_title", "KREPŠINIS")
 
-                            if over_obj and under_obj:
-                                line = float(over_obj.get("point", 0))
-                                over_odds = float(over_obj.get("price", 1.85))
-                                under_odds = float(under_obj.get("price", 1.85))
+                    bookmakers = ev.get("bookmakers", [])
+                    if not bookmakers:
+                        continue
 
-                                match_name = f"{home} vs {away}"
-                                if not any(x["match"] == match_name for x in matches):
-                                    matches.append({
-                                        "league": f"🏀 {str(sport_title).upper()}",
-                                        "match": match_name,
-                                        "line": line,
-                                        "over_odds": over_odds,
-                                        "under_odds": under_odds
-                                    })
-                                break
-    except Exception as e:
-        print("Klaida imant duomenis:", e)
+                    for bm in bookmakers:
+                        markets = bm.get("markets", [])
+                        for m in markets:
+                            if m.get("key") == "totals":
+                                outcomes = m.get("outcomes", [])
+                                over_obj = next((o for o in outcomes if o.get("name") == "Over"), None)
+                                under_obj = next((o for o in outcomes if o.get("name") == "Under"), None)
+
+                                if over_obj and under_obj:
+                                    line = float(over_obj.get("point", 0))
+                                    over_odds = float(over_obj.get("price", 1.85))
+                                    under_odds = float(under_obj.get("price", 1.85))
+
+                                    match_name = f"{home} vs {away}"
+                                    if not any(x["match"] == match_name for x in matches):
+                                        matches.append({
+                                            "league": f"🏀 {str(sport_title).upper()}",
+                                            "match": match_name,
+                                            "line": line,
+                                            "over_odds": over_odds,
+                                            "under_odds": under_odds
+                                        })
+                                    break
+        except Exception as e:
+            print(f"Klaida imant {league_key}:", e)
 
     return matches
 
@@ -93,22 +105,18 @@ def run_agent():
     matches = fetch_basketball_odds()
 
     if not matches:
-        send_telegram_msg(f"ℹ️ *{today_date}:* Krepšinio mačų su pateiktomis Over/Under ribomis nerasta.")
+        send_telegram_msg(f"ℹ️ *{today_date}:* Europos krepšinio lygose (ACB, BBL, LNB) šiuo metu aktyvių mačų su Over/Under ribomis nepateikta.")
         return
 
-    full_report = f"🔥 *VERČIAUSI DIENOS STATYMAI ({today_date})*\n"
-    full_report += f"Išanalizuota mačų pasiūloje: *{len(matches)}*\n"
+    full_report = f"🔥 *EUROPOS KREPŠINIO PROGNOZĖS ({today_date})*\n"
+    full_report += f"Rasta aktyvių mačų: *{len(matches)}*\n"
     full_report += "───────────────────────────\n\n"
-
-    valuable_count = 0
 
     for m in matches:
         sims = 10000
-        
-        # Algoritmas: Puasono modeliavimas pagal rinkos bazę ir komandų kompensacinį poslinkį
         base_exp = m["line"] / 2
-        home_exp = base_exp + random.uniform(-1.8, 2.2)
-        away_exp = base_exp + random.uniform(-2.2, 1.8)
+        home_exp = base_exp + random.uniform(-1.5, 1.8)
+        away_exp = base_exp + random.uniform(-1.8, 1.5)
         
         h, a = simulate_basketball_game(home_exp, away_exp, sims)
         totals = [x + y for x, y in zip(h, a)]
@@ -119,32 +127,22 @@ def run_agent():
         val_over = (prob_over * m["over_odds"]) - 1
         val_under = (prob_under * m["under_odds"]) - 1
 
-        # Generuojame pranešimą tik mačams, kurie turi teigiamą vertę (> +1.5%)
-        if val_over > 0.015 or val_under > 0.015:
-            valuable_count += 1
-            proj_total = sum(totals) / sims
-            
-            full_report += f"🏆 *{m['league']}*\n"
-            full_report += f"⚔️ *{m['match']}*\n"
-            full_report += f"📊 Riba: *{m['line']}* | Prognozuojama: *{proj_total:.1f}*\n"
+        proj_total = sum(totals) / sims
+        
+        full_report += f"🏆 *{m['league']}*\n"
+        full_report += f"⚔️ *{m['match']}*\n"
+        full_report += f"📊 Riba: *{m['line']}* | Prognozuojama: *{proj_total:.1f}*\n"
 
-            if val_over >= val_under:
-                full_report += f"🎯 *REKOMENDACIJA:* **OVER {m['line']}**\n"
-                full_report += f"📈 Koeficientas: `{m['over_odds']}` | Vertė: *+{val_over*100:.1f}%*\n"
-            else:
-                full_report += f"🎯 *REKOMENDACIJA:* **UNDER {m['line']}**\n"
-                full_report += f"📈 Koeficientas: `{m['under_odds']}` | Vertė: *+{val_under*100:.1f}%*\n"
+        if val_over >= val_under and val_over > 0:
+            full_report += f"🎯 *REKOMENDACIJA:* **OVER {m['line']}** (Koef: `{m['over_odds']}`, Vertė: +{val_over*100:.1f}%)\n"
+        elif val_under > 0:
+            full_report += f"🎯 *REKOMENDACIJA:* **UNDER {m['line']}** (Koef: `{m['under_odds']}`, Vertė: +{val_under*100:.1f}%)\n"
+        else:
+            full_report += f"⚖️ *Riba nustatyta tiksliai.*\n"
 
-            full_report += "\n" + "─"*20 + "\n\n"
+        full_report += "\n" + "─"*20 + "\n\n"
 
-            # Apsauga nuo Telegram žinutės ilgio limito
-            if valuable_count >= 8:
-                break
-
-    if valuable_count == 0:
-        send_telegram_msg(f"ℹ️ *{today_date}:* Išanalizavus {len(matches)} mačų, nė vienas neturėjo pakankamos matematinės vertės statymui.")
-    else:
-        send_telegram_msg(full_report)
+    send_telegram_msg(full_report)
 
 if __name__ == "__main__":
     run_agent()
