@@ -2,7 +2,7 @@ import math
 import random
 import os
 import requests
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
@@ -34,27 +34,32 @@ def simulate_basketball_game(expected_home_pts, expected_away_pts, simulations=1
         away_scores.append(generate_poisson(expected_away_pts))
     return home_scores, away_scores
 
-def fetch_basketball_odds():
+def get_active_basketball_sports():
     if not ODDS_API_KEY:
         return []
+    url = f"https://api.the-odds-api.com/v4/sports/?apiKey={ODDS_API_KEY}"
+    try:
+        res = requests.get(url, timeout=8)
+        if res.status_code == 200:
+            sports = res.json()
+            # Paimame visas krepšinio lygas
+            return [s["key"] for s in sports if s.get("group") == "Basketball"]
+    except Exception as e:
+        print("Klaida gaunant lygas:", e)
+    return ["basketball_euroleague", "basketball_spain_acb", "basketball_germany_bbl"]
 
-    # Tikriname Europos lygas, kuriose šiandien vyksta rungtynės
-    euro_leagues = [
-        "basketball_euroleague",
-        "basketball_spain_acb",
-        "basketball_germany_bbl",
-        "basketball_france_lnb",
-        "basketball_italy_lega_a",
-        "basketball_turkey_tbl"
-    ]
-
+def fetch_today_odds():
+    sports = get_active_basketball_sports()
     matches = []
 
-    for league_key in euro_leagues:
-        url = f"https://api.the-odds-api.com/v4/sports/{league_key}/odds/"
+    now = datetime.now(timezone.utc)
+    end_of_day = now + timedelta(hours=20) # Tikriname artimiausias 20 valandų (šios dienos mačus)
+
+    for sport_key in sports:
+        url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds/"
         params = {
             "apiKey": ODDS_API_KEY,
-            "regions": "eu",
+            "regions": "eu,us",
             "markets": "totals",
             "oddsFormat": "decimal"
         }
@@ -64,6 +69,13 @@ def fetch_basketball_odds():
             if res.status_code == 200:
                 events = res.json()
                 for ev in events:
+                    # Tikriname rungtynių laiką – paliekame TIK šios dienos
+                    commence_time_str = ev.get("commence_time")
+                    if commence_time_str:
+                        match_time = datetime.fromisoformat(commence_time_str.replace("Z", "+00:00"))
+                        if not (now <= match_time <= end_of_day):
+                            continue # Praleidžiame mačus, kurie vyks po kelių dienų
+
                     home = ev.get("home_team")
                     away = ev.get("away_team")
                     sport_title = ev.get("sport_title", "KREPŠINIS")
@@ -87,29 +99,31 @@ def fetch_basketball_odds():
 
                                     match_name = f"{home} vs {away}"
                                     if not any(x["match"] == match_name for x in matches):
+                                        local_time = match_time.strftime("%H:%M") if commence_time_str else ""
                                         matches.append({
                                             "league": f"🏀 {str(sport_title).upper()}",
                                             "match": match_name,
+                                            "time": local_time,
                                             "line": line,
                                             "over_odds": over_odds,
                                             "under_odds": under_odds
                                         })
                                     break
         except Exception as e:
-            print(f"Klaida imant {league_key}:", e)
+            print(f"Klaida imant {sport_key}:", e)
 
     return matches
 
 def run_agent():
-    today_date = datetime.now().strftime("%Y-%m-%d %H:%M")
-    matches = fetch_basketball_odds()
+    today_date = datetime.now().strftime("%Y-%m-%d")
+    matches = fetch_today_odds()
 
     if not matches:
-        send_telegram_msg(f"ℹ️ *{today_date}:* Europos krepšinio lygose (ACB, BBL, LNB) šiuo metu aktyvių mačų su Over/Under ribomis nepateikta.")
+        send_telegram_msg(f"ℹ️ *{today_date}:* Šios dienos krepšinio pasiūloje aktyvių mačų su Over/Under ribomis nerasta.")
         return
 
-    full_report = f"🔥 *EUROPOS KREPŠINIO PROGNOZĖS ({today_date})*\n"
-    full_report += f"Rasta aktyvių mačų: *{len(matches)}*\n"
+    full_report = f"🔥 *ŠIOS DIENOS KREPŠINIO PROGNOZĖS ({today_date})*\n"
+    full_report += f"Rasta šios dienos mačų: *{len(matches)}*\n"
     full_report += "───────────────────────────\n\n"
 
     for m in matches:
@@ -128,8 +142,9 @@ def run_agent():
         val_under = (prob_under * m["under_odds"]) - 1
 
         proj_total = sum(totals) / sims
-        
-        full_report += f"🏆 *{m['league']}*\n"
+        time_str = f"| 🕒 `{m['time']}`" if m['time'] else ""
+
+        full_report += f"🏆 *{m['league']}* {time_str}\n"
         full_report += f"⚔️ *{m['match']}*\n"
         full_report += f"📊 Riba: *{m['line']}* | Prognozuojama: *{proj_total:.1f}*\n"
 
