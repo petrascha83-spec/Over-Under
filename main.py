@@ -1,5 +1,4 @@
 import math
-import random
 import os
 import requests
 from datetime import datetime, timezone, timedelta
@@ -19,48 +18,33 @@ def send_telegram_msg(message):
     except Exception as e:
         print("Klaida siunčiant į Telegram:", e)
 
-def generate_poisson(lam):
-    L = math.exp(-lam)
-    k, p = 0, 1.0
-    while p > L:
-        k += 1
-        p *= random.random()
-    return k - 1
-
-def simulate_basketball_game(expected_home_pts, expected_away_pts, simulations=10000):
-    home_scores, away_scores = [], []
-    for _ in range(simulations):
-        home_scores.append(generate_poisson(expected_home_pts))
-        away_scores.append(generate_poisson(expected_away_pts))
-    return home_scores, away_scores
-
-def fetch_today_odds():
+def fetch_all_basketball_sports():
     if not ODDS_API_KEY:
         return []
-
-    # Skenuojame visas įmanomas krepšinio lygas iš API
-    sports_url = f"https://api.the-odds-api.com/v4/sports/?apiKey={ODDS_API_KEY}"
-    b_sports = []
+    url = f"https://api.the-odds-api.com/v4/sports/?apiKey={ODDS_API_KEY}"
     try:
-        res = requests.get(sports_url, timeout=8)
+        res = requests.get(url, timeout=8)
         if res.status_code == 200:
-            all_sports = res.json()
-            b_sports = [s["key"] for s in all_sports if s.get("group") == "Basketball"]
+            sports = res.json()
+            # Dinamiškai paimame VISAS krepšinio lygas iš API
+            return [s["key"] for s in sports if s.get("group") == "Basketball"]
     except Exception as e:
         print("Klaida gaunant lygų sąrašą:", e)
+    return ["basketball_nba", "basketball_wnba", "basketball_euroleague", "basketball_spain_acb", "basketball_germany_bbl"]
 
-    if not b_sports:
-        b_sports = ["basketball_euroleague", "basketball_spain_acb", "basketball_germany_bbl", "basketball_wnba"]
-
+def fetch_today_odds():
+    b_sports = fetch_all_basketball_sports()
     matches = []
+    
+    # Tikriname šios dienos mačus (20 valandų langas nuo dabar)
     now = datetime.now(timezone.utc)
-    end_of_day = now + timedelta(hours=18) # Tik šios dienos langas
+    end_of_day = now + timedelta(hours=20)
 
     for sport_key in b_sports:
         url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds/"
         params = {
             "apiKey": ODDS_API_KEY,
-            "regions": "eu,uk,us", # Įtraukiame Europos bukmeikerius
+            "regions": "eu,uk,us", # Skaityti visų regionų bukmeikerius
             "markets": "totals",
             "oddsFormat": "decimal"
         }
@@ -114,46 +98,47 @@ def fetch_today_odds():
 
     return matches
 
+def analyze_match(line, over_odds, under_odds):
+    # Deterministinė/stabili vertės apskaičiavimo metodika be atsitiktinių nuokrypių
+    fair_prob_over = 1 / over_odds
+    fair_prob_under = 1 / under_odds
+    total_margin = fair_prob_over + fair_prob_under
+    
+    no_margin_over = fair_prob_over / total_margin
+    no_margin_under = fair_prob_under / total_margin
+
+    val_over = (no_margin_over * over_odds) - 1
+    val_under = (no_margin_under * under_odds) - 1
+
+    return val_over, val_under
+
 def run_agent():
     today_date = datetime.now().strftime("%Y-%m-%d")
     matches = fetch_today_odds()
 
     if not matches:
-        send_telegram_msg(f"ℹ️ *{today_date}:* Šiuo metu tarptautiniuose API šaltiniuose šios dienos vyro/moterų krepšinio Over/Under ribų nerasta (arba jos bus pateiktos vėliau).")
+        send_telegram_msg(f"ℹ️ *{today_date}:* Šios dienos pasiūloje aktyvių mačų su Over/Under ribomis visose lygose nerasta.")
         return
 
     full_report = f"🔥 *ŠIOS DIENOS KREPŠINIO PROGNOZĖS ({today_date})*\n"
-    full_report += f"Surasta mačų šiai dienai: *{len(matches)}*\n"
+    full_report += f"Surasta šios dienos mačų (visos lygos): *{len(matches)}*\n"
     full_report += "───────────────────────────\n\n"
 
     for m in matches:
-        sims = 10000
-        base_exp = m["line"] / 2
-        home_exp = base_exp + random.uniform(-1.5, 1.8)
-        away_exp = base_exp + random.uniform(-1.8, 1.5)
-        
-        h, a = simulate_basketball_game(home_exp, away_exp, sims)
-        totals = [x + y for x, y in zip(h, a)]
-
-        prob_over = sum(1 for t in totals if t > m["line"]) / sims
-        prob_under = sum(1 for t in totals if t < m["line"]) / sims
-
-        val_over = (prob_over * m["over_odds"]) - 1
-        val_under = (prob_under * m["under_odds"]) - 1
-
-        proj_total = sum(totals) / sims
+        val_over, val_under = analyze_match(m["line"], m["over_odds"], m["under_odds"])
         time_str = f"| 🕒 `{m['time']} UTC`" if m['time'] else ""
 
         full_report += f"🏆 *{m['league']}* {time_str}\n"
         full_report += f"⚔️ *{m['match']}*\n"
-        full_report += f"📊 Riba: *{m['line']}* | Prognozuojama: *{proj_total:.1f}*\n"
+        full_report += f"📊 Total Riba: *{m['line']}*\n"
+        full_report += f"🔹 Over `{m['line']}`: *{m['over_odds']}* | Under `{m['line']}`: *{m['under_odds']}*\n"
 
-        if val_over >= val_under and val_over > 0:
-            full_report += f"🎯 *REKOMENDACIJA:* **OVER {m['line']}** (Koef: `{m['over_odds']}`, Vertė: +{val_over*100:.1f}%)\n"
-        elif val_under > 0:
-            full_report += f"🎯 *REKOMENDACIJA:* **UNDER {m['line']}** (Koef: `{m['under_odds']}`, Vertė: +{val_under*100:.1f}%)\n"
+        if m['over_odds'] < m['under_odds']:
+            full_report += f"🎯 *RINKOS TENDENCIJA:* **OVER {m['line']}**\n"
+        elif m['under_odds'] < m['over_odds']:
+            full_report += f"🎯 *RINKOS TENDENCIJA:* **UNDER {m['line']}**\n"
         else:
-            full_report += f"⚖️ *Riba nustatyta tiksliai.*\n"
+            full_report += f"⚖️ *Riba padalinta lygiai (50/50)*\n"
 
         full_report += "\n" + "─"*20 + "\n\n"
 
